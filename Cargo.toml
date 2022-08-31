@@ -1,0 +1,8 @@
+[package]
+name = "cpq"
+version = "0.0.0"
+edition = "2021"
+description = "A concurrent Priority Queue."
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/hankjordan/cpq"
