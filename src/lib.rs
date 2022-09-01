@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_else_if)]
+
 use std::collections::hash_map::{RandomState};
 use std::mem::ManuallyDrop;
 use std::ptr;
@@ -6,6 +8,8 @@ use std::sync::atomic::Ordering::{Acquire, Release, Relaxed};
 use std::hash::{Hash, BuildHasher};
 
 use crossbeam::epoch::{self, Atomic, Owned};
+
+mod raw;
 
 struct Node<I, P, H = RandomState> {
     item: ManuallyDrop<I>,

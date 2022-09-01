@@ -9,3 +9,4 @@ repository = "https://github.com/hankjordan/cpq"
 
 [dependencies]
 crossbeam = "0.8"
+scopeguard = "1.1"
