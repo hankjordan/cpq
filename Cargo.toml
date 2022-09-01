@@ -8,8 +8,4 @@ readme = "README.md"
 repository = "https://github.com/hankjordan/cpq"
 
 [dependencies]
-dashmap = { version = "5.4", features = ["raw-api"] }
-crossbeam-skiplist_piedb = "0.8"
-lock_api = "0.4"
-hashbrown = "0.12"
-crossbeam-epoch = "0.9"
+crossbeam = "0.8"
