@@ -1,5 +1,4 @@
 use cpq::*;
-use fxhash::FxBuildHasher;
 
 #[derive(Hash, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Location {
@@ -15,7 +14,7 @@ impl Location {
 }
 
 fn main() {
-    let cpq: ConcurrentPriorityQueue<Location, u32, _> = ConcurrentPriorityQueue::with_hasher(FxBuildHasher::default());
+    let cpq: ConcurrentPriorityQueue<Location, u32> = ConcurrentPriorityQueue::new();
     
     cpq.push(Location::new(0, 0, 0), 0);
     cpq.push(Location::new(0, 0, 0), 2);
