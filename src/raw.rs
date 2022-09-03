@@ -40,7 +40,7 @@ impl<I, P> Node<I, P> {
     }
 
     unsafe fn finalize(ptr: *const Self) {
-        Box::from_raw(ptr as *mut Self);
+        drop(Box::from_raw(ptr as *mut Self));
     }
 
     /// Decrements the reference count of a node, destroying it if the count becomes zero.
@@ -109,13 +109,8 @@ pub struct RawCPQ<I, P, H = RandomState>
     priorities: Atomic<Node<I, P>>,
 }
 
-impl<I, P, H> RawCPQ<I, P, H>
-where
-    I: Hash + Eq,
-    P: Ord,
-    H: BuildHasher + Clone,
-{
-    pub fn with_collector_and_hasher(collector: Collector, hasher: H) -> Self {
+impl<I, P, H> RawCPQ<I, P, H> {
+    pub fn new(collector: Collector, hasher: H) -> Self {
         Self {
             collector,
             hasher,
@@ -146,12 +141,17 @@ where
     }
 }
 
-impl<I, P> RawCPQ<I, P>
+impl<I, P, H> RawCPQ<I, P, H>
 where
     I: Hash + Eq,
     P: Ord,
+    H: BuildHasher,
 {
-    pub fn get_priority<'a: 'g, 'g, Q>(&'a self, priority: &Q, guard: &'g Guard) -> Option<Entry<'a, 'g, I, P>>
+    pub fn push(&self, item: I, priority: P, guard: &Guard) -> RefEntry<'_, I, P, H> {
+        self.insert_internal(item, priority, true, guard)
+    }
+    
+    pub fn get_priority<'a: 'g, 'g, Q>(&'a self, priority: &Q, guard: &'g Guard) -> Option<Entry<'a, 'g, I, P, H>>
     where
         P: Borrow<Q>,
         Q: Ord + ?Sized,
@@ -359,27 +359,84 @@ where
         priority: P,
         replace: bool,
         guard: &Guard,
-    ) -> RefEntry<'_, I, P>
+    ) -> RefEntry<'_, I, P, H>
     {
         self.check_guard(guard);
 
-        unsafe {
-            // Rebind the guard to the lifetime of self. This is a bit of a
-            // hack but it allows us to return references that are not bound to
-            // the lifetime of the guard.
-            let guard = &*(guard as *const _);
+        // Rebind the guard to the lifetime of self. This is a bit of a
+        // hack but it allows us to return references that are not bound to
+        // the lifetime of the guard.
+        let guard = unsafe { &*(guard as *const _) };
 
-            let mut search;
-            loop {
-                // First try searching for the key.
-                // Note that the `Ord` implementation for `K` may panic during the search.
-                search = self.search_item(&item, guard);
+        let mut search_item;
+        
+        loop {
+            // First try searching for the key.
+            // Note that the `Ord` implementation for `K` may panic during the search.
+            search_item = self.search_item(&item, guard);
 
-                let r = match search.found {
-                    Some(r) => r,
-                    None => break,
-                };
+            let r = match search_item.found {
+                Some(r) => r,
+                None => break,
+            };
 
+            if replace && r.priority != priority {
+                // If a node with the key was found and we should replace it.
+                // Mark it as removed and then repeat the search.
+                if r.mark() {
+                    self.length.fetch_sub(1, Relaxed);
+                }
+            } else {
+                // If a node with the key was found and we're not going to replace it, let's
+                // try returning it as an entry.
+                if let Some(e) = unsafe { RefEntry::try_acquire(self, r) } {
+                    return e;
+                }
+
+                // If we couldn't increment the reference count, that means someone has just
+                // now removed the node.
+                break;
+            }
+        }
+
+        let mut search_priority = self.search_priority_position(&priority, guard);
+
+        let (node, n) = unsafe {
+            // The reference count is initially three to account for:
+            // 1. The entry that will be returned.
+            // 2. The link from the 'items' list
+            // 3. The link from the 'priorities' list
+            let n = Node::alloc(
+                item,
+                priority,
+                3
+            );
+
+            (Shared::<Node<I, P>>::from(n as *const _), &*n)
+        };
+
+        // Optimistically increment `len`.
+        self.length.fetch_add(1, Relaxed);
+
+        // Add node to 'items' list
+        loop {
+            n.next_item.store(search_item.right, Relaxed);
+
+            if search_item.left.compare_exchange(search_item.right, node, SeqCst, SeqCst, guard).is_ok() {
+                break;
+            }
+
+            // We failed. Let's search for the item and try again.
+            {
+                // Create a guard that destroys the new node in case search panics.
+                let sg = scopeguard::guard((), |_| {
+                    unsafe { Node::finalize(node.as_raw()) };
+                });
+                search_item = self.search_item(&n.item, guard);
+                mem::forget(sg);
+            }
+
+            if let Some(r) = search_item.found {
                 if replace {
                     // If a node with the key was found and we should replace it.
                     // Mark it as removed and then repeat the search.
@@ -387,80 +444,42 @@ where
                         self.length.fetch_sub(1, Relaxed);
                     }
                 } else {
-                    // If a node with the key was found and we're not going to replace it, let's
-                    // try returning it as an entry.
-                    if let Some(e) = RefEntry::try_acquire(self, r) {
+                    if let Some(e) = unsafe { RefEntry::try_acquire(self, r) } {
+                        // Destroy the new node.
+                        unsafe { Node::finalize(node.as_raw()) };
+                        self.length.fetch_sub(1, Relaxed);
+
                         return e;
                     }
-
-                    // If we couldn't increment the reference count, that means someone has just
-                    // now removed the node.
-                    break;
                 }
             }
+        }
 
-            let (node, n) = {
-                // The reference count is initially three to account for:
-                // 1. The entry that will be returned.
-                // 2. The link from the 'items' list
-                // 3. The link from the 'priorities' list
-                let n = Node::alloc(
-                    item,
-                    priority,
-                    3
-                );
+        // Add node to 'priorities' list
+        loop {
+            n.next_priority.store(search_priority.right, Relaxed);
 
-                (Shared::<Node<I, P>>::from(n as *const _), &*n)
-            };
-
-            // Optimistically increment `len`.
-            self.length.fetch_add(1, Relaxed);
-
-            // Add node to 'items' list
-            loop {
-                n.next_item.store(search.right, Relaxed);
-
-                if search.left.compare_exchange(search.right, node, SeqCst, SeqCst, guard).is_ok() {
-                    break;
-                }
-
-                // We failed. Let's search for the key and try again.
-                {
-                    // Create a guard that destroys the new node in case search panics.
-                    let sg = scopeguard::guard((), |_| {
-                        Node::finalize(node.as_raw());
-                    });
-                    search = self.search_item(&n.item, guard);
-                    mem::forget(sg);
-                }
-
-                if let Some(r) = search.found {
-                    if replace {
-                        // If a node with the key was found and we should replace it.
-                        // Mark it as removed and then repeat the search.
-                        if r.mark() {
-                            self.length.fetch_sub(1, Relaxed);
-                        }
-                    } else {
-                        if let Some(e) = RefEntry::try_acquire(self, r) {
-                            // Destroy the new node.
-                            Node::finalize(node.as_raw());
-                            self.length.fetch_sub(1, Relaxed);
-
-                            return e;
-                        }
-                    }
-                }
+            if search_priority.left.compare_exchange(search_priority.right, node, SeqCst, SeqCst, guard).is_ok() {
+                break;
             }
 
-            // Add node to 'priorities' list
-            // TODO
+            // We failed. Let's search for the priority and try again.
+            {
+                // Create a guard that destroys the new node in case search panics.
+                let sg = scopeguard::guard((), |_| {
+                    unsafe { Node::finalize(node.as_raw()) };
+                });
 
-            // Finally, return the new entry.
-            RefEntry {
-                parent: self,
-                node: n,
+                search_priority = self.search_priority_position(&n.priority, guard);
+
+                mem::forget(sg);
             }
+        }
+
+        // Finally, return the new entry.
+        RefEntry {
+            parent: self,
+            node: n,
         }
     }
 }
@@ -483,8 +502,8 @@ fn below_upper_bound<T: Ord + ?Sized>(bound: &Bound<&T>, other: &T) -> bool {
     }
 }
 
-pub struct Entry<'a: 'g, 'g, I, P> {
-    parent: &'a RawCPQ<I, P>,
+pub struct Entry<'a: 'g, 'g, I, P, H> {
+    parent: &'a RawCPQ<I, P, H>,
     node: &'g Node<I, P>,
     guard: &'g Guard,
 }
@@ -493,18 +512,18 @@ pub struct Entry<'a: 'g, 'g, I, P> {
 ///
 /// You *must* call `release` to free this type, otherwise the node will be
 /// leaked. This is because releasing the entry requires a `Guard`.
-pub struct RefEntry<'a, I, P> {
-    parent: &'a RawCPQ<I, P>,
+pub struct RefEntry<'a, I, P, H> {
+    parent: &'a RawCPQ<I, P, H>,
     node: &'a Node<I, P>,
 }
 
-impl<'a, I, P> RefEntry<'a, I, P> {
+impl<'a, I, P, H> RefEntry<'a, I, P, H> {
     /// Tries to create a new `RefEntry` by incrementing the reference count of
     /// a node.
     unsafe fn try_acquire(
-        parent: &'a RawCPQ<I, P>,
+        parent: &'a RawCPQ<I, P, H>,
         node: &Node<I, P>,
-    ) -> Option<RefEntry<'a, I, P>> {
+    ) -> Option<RefEntry<'a, I, P, H>> {
         if node.try_increment() {
             Some(RefEntry {
                 parent,
