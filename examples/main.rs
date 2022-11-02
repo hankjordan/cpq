@@ -14,12 +14,22 @@ impl Location {
 }
 
 fn main() {
-    let cpq: ConcurrentPriorityQueue<Location, u32> = ConcurrentPriorityQueue::new();
-    
-    cpq.push(Location::new(0, 0, 0), 0);
-    cpq.push(Location::new(0, 0, 0), 2);
-    cpq.push(Location::new(5, 0, 0), 7);
-    cpq.push(Location::new(0, 6, 0), 2);
+    let cpq: ConcurrentPriorityQueue<Location, i32> = ConcurrentPriorityQueue::new();
 
-    println!("POP {:?}", cpq.pop());
+    let a = Location::new(0, 0, 0);
+    let b = Location::new(0, 0, 0);
+    let c = Location::new(5, 0, 0);
+    let d = Location::new(0, 6, 0);
+    
+    cpq.push(a, 0);
+    cpq.push(b, 2);
+    cpq.push(c, 7);
+    cpq.push(d, 2);
+
+    assert_eq!(cpq.pop(), Some(a));
+    assert_eq!(cpq.pop(), Some(b));
+    assert_eq!(cpq.pop(), Some(d));
+    assert_eq!(cpq.pop(), Some(c));
+
+    println!("OK");
 }
