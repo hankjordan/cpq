@@ -8,4 +8,4 @@ See `examples/main` for usage - it's an extremely simple API based on `push` / `
 
 ## Soundness
 - `v0.1.0` was an implementation with raw atomics, using Unsafe Rust.
-- `v0.2.0` or greater uses a RwLock internally, with zero Unsafe Rust.
+- `v0.2.0` or greater is a naive implementation and uses a RwLock internally, with zero Unsafe Rust.
